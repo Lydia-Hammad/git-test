@@ -1,0 +1,154 @@
+nextflow.enable.dsl=2
+
+// Définition du pipeline
+process IMPORT_SEQUENCES {
+    tag 'Importation des séquences'
+
+    input:
+    path input_dir
+    path metadata_file
+
+    output:
+    path "sequences.qza"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    qiime tools import \\
+      --type 'SampleData[PairedEndSequencesWithQuality]' \\
+      --input-path $input_dir \\
+      --input-format CasavaOneEightSingleLanePerSampleDirFmt \\
+      --output-path sequences.qza
+    """
+}
+
+process QUALITY_SUMMARY {
+    tag 'Résumé de la qualité'
+
+    input:
+    path sequences
+
+    output:
+    path "sequences.qzv"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    qiime demux summarize \\
+      --i-data $sequences \\
+      --o-visualization sequences.qzv
+    """
+}
+
+process DADA2_DENOISE {
+    tag 'Denoising avec DADA2'
+
+    input:
+    path sequences
+
+    output:
+    path "feature-table.qza"
+    path "rep-seqs.qza"
+    path "denoising-stats.qza"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    qiime dada2 denoise-paired \\
+      --i-demultiplexed-seqs $sequences \\
+      --p-trim-left-f 0 --p-trim-left-r 0 \\
+      --p-trunc-len-f 250 --p-trunc-len-r 250 \\
+      --o-table feature-table.qza \\
+      --o-representative-sequences rep-seqs.qza \\
+      --o-denoising-stats denoising-stats.qza
+    """
+}
+
+process ALIGN_TREE {
+    tag 'Alignement et phylogénie'
+
+    input:
+    path rep_seqs
+
+    output:
+    path "rooted-tree.qza"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    qiime phylogeny align-to-tree-mafft-fasttree \\
+      --i-sequences $rep_seqs \\
+      --o-tree rooted-tree.qza
+    """
+}
+
+process DIVERSITY_ANALYSIS {
+    tag 'Analyse de diversité'
+
+    input:
+    path feature_table
+    path rooted_tree
+    path metadata_file
+
+    output:
+    path "diversity-results/"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    mkdir diversity-results
+    qiime diversity core-metrics-phylogenetic \\
+      --i-table $feature_table \\
+      --i-phylogeny $rooted_tree \\
+      --m-metadata-file $metadata_file \\
+      --p-sampling-depth 10000 \\
+      --o-rarefied-table diversity-results/rarefied-table.qza \\
+      --o-faith-pd-vector diversity-results/faith_pd.qza \\
+      --o-evenness-vector diversity-results/evenness.qza \\
+      --o-unweighted-unifrac-pcoa-results diversity-results/unweighted-unifrac-pcoa.qza
+    """
+}
+
+process TAXONOMY_CLASSIFICATION {
+    tag 'Classification taxonomique'
+
+    input:
+    path rep_seqs
+    path classifier
+
+    output:
+    path "taxonomy.qza"
+    path "taxonomy.qzv"
+
+    conda "qiime2-combined-2024.10"
+
+    script:
+    """
+    qiime feature-classifier classify-sklearn \\
+      --i-classifier $classifier \\
+      --i-reads $rep_seqs \\
+      --o-classification taxonomy.qza
+
+    qiime metadata tabulate \\
+      --m-input-file taxonomy.qza \\
+      --o-visualization taxonomy.qzv
+    """
+}
+
+workflow {
+    params.input_dir = "/path/to/fastq"
+    params.metadata_file = "/path/to/metadata.tsv"
+    params.classifier = "/path/to/silva-138-99-515-806-nb-classifier.qza"
+
+    IMPORT_SEQUENCES(input_dir: params.input_dir, metadata_file: params.metadata_file) | 
+    QUALITY_SUMMARY | 
+    DADA2_DENOISE |
+    ALIGN_TREE | 
+    DIVERSITY_ANALYSIS |
+    TAXONOMY_CLASSIFICATION(classifier: params.classifier)
+}
